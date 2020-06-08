@@ -96,9 +96,10 @@ func (rc *RunContext) startJobContainer() common.Executor {
 			Name:       name,
 			Env:        envList,
 			Mounts: map[string]string{
-				name:            "/github",
-				"act-toolcache": "/toolcache",
-				"act-actions":   "/actions",
+				name:              "/github",
+				"act-toolcache":   "/toolcache",
+				"act-actions":     "/actions",
+				"act-runner-home": "/home/runner",
 			},
 			NetworkMode: "host",
 			Binds:       binds,
@@ -118,14 +119,15 @@ func (rc *RunContext) startJobContainer() common.Executor {
 			rc.JobContainer.Remove().IfBool(!rc.Config.ReuseContainers),
 			rc.JobContainer.Create(),
 			rc.JobContainer.Start(false),
-			rc.JobContainer.CopyDir(copyToPath, rc.Config.Workdir+"/.").IfBool(copyWorkspace),
+			rc.JobContainer.CopyDir(copyToPath, rc.Config.Workdir+"/.", false).IfBool(copyWorkspace),
+			rc.JobContainer.ChangeRemoteToHttps(copyToPath).IfBool(copyWorkspace),
 			rc.JobContainer.Copy("/github/", &container.FileEntry{
 				Name: "workflow/event.json",
-				Mode: 644,
+				Mode: 0644,
 				Body: rc.EventJSON,
 			}, &container.FileEntry{
 				Name: "home/.act",
-				Mode: 644,
+				Mode: 0644,
 				Body: "",
 			}),
 		)(ctx)

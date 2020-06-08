@@ -128,7 +128,7 @@ func (sc *StepContext) setupShellCommand() common.Executor {
 		sc.Cmd = strings.Fields(strings.Replace(step.ShellCommand(), "{0}", containerPath, 1))
 		return rc.JobContainer.Copy("/github/", &container.FileEntry{
 			Name: scriptName,
-			Mode: 755,
+			Mode: 0755,
 			Body: script.String(),
 		})(ctx)
 	}
@@ -266,7 +266,7 @@ func (sc *StepContext) runAction(actionDir string, actionPath string) common.Exe
 		switch action.Runs.Using {
 		case model.ActionRunsUsingNode12:
 			if step.Type() == model.StepTypeUsesActionRemote {
-				err := rc.JobContainer.CopyDir(containerActionDir+string(filepath.Separator), actionDir)(ctx)
+				err := rc.JobContainer.CopyDir(containerActionDir+string(filepath.Separator), actionDir, true)(ctx)
 				if err != nil {
 					return err
 				}

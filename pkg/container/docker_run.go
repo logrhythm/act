@@ -53,7 +53,8 @@ type FileEntry struct {
 type Container interface {
 	Create() common.Executor
 	Copy(destPath string, files ...*FileEntry) common.Executor
-	CopyDir(destPath string, srcPath string) common.Executor
+	CopyDir(destPath string, srcPath string, bypassIgnore bool) common.Executor
+	ChangeRemoteToHttps(destPath string) common.Executor
 	Pull(forcePull bool) common.Executor
 	Start(attach bool) common.Executor
 	Exec(command []string, env map[string]string) common.Executor
@@ -105,13 +106,23 @@ func (cr *containerReference) Copy(destPath string, files ...*FileEntry) common.
 	).IfNot(common.Dryrun)
 }
 
-func (cr *containerReference) CopyDir(destPath string, srcPath string) common.Executor {
+func (cr *containerReference) CopyDir(destPath string, srcPath string, bypassIgnore bool) common.Executor {
 	return common.NewPipelineExecutor(
 		common.NewInfoExecutor("%sdocker cp src=%s dst=%s", logPrefix, srcPath, destPath),
 		cr.connect(),
 		cr.find(),
 		cr.exec([]string{"mkdir", "-p", destPath}, nil),
-		cr.copyDir(destPath, srcPath),
+		cr.copyDir(destPath, srcPath, bypassIgnore),
+	).IfNot(common.Dryrun)
+}
+
+// Mimic behavior of GithubAction Checkout@v2
+func (cr *containerReference) ChangeRemoteToHttps(destPath string) common.Executor {
+	return common.NewPipelineExecutor(
+		common.NewInfoExecutor("%s Change Remote to HTTPS src=%s", logPrefix, destPath),
+		cr.connect(),
+		cr.find(),
+		cr.exec([]string{"/bin/bash", "-c", fmt.Sprintf("cd %s && git remote set-url origin https://github.com/$(git remote get-url origin | sed 's/https:\\/\\/github.com\\///' | sed 's/git@github.com://' | sed 's/.git$//') && git remote get-url origin", destPath)}, nil),
 	).IfNot(common.Dryrun)
 }
 
@@ -341,7 +352,7 @@ func (cr *containerReference) exec(cmd []string, env map[string]string) common.E
 }
 
 // nolint: gocyclo
-func (cr *containerReference) copyDir(dstPath string, srcPath string) common.Executor {
+func (cr *containerReference) copyDir(dstPath string, srcPath string, bypassIgnore bool) common.Executor {
 	return func(ctx context.Context) error {
 		logger := common.Logger(ctx)
 		tarFile, err := ioutil.TempFile("", "act")
@@ -373,11 +384,13 @@ func (cr *containerReference) copyDir(dstPath string, srcPath string) common.Exe
 
 			sansPrefix := strings.TrimPrefix(file, srcPrefix)
 			split := strings.Split(sansPrefix, string(filepath.Separator))
-			if ignorer.Match(split, fi.IsDir()) {
-				if fi.IsDir() {
-					return filepath.SkipDir
+			if !bypassIgnore {
+				if ignorer.Match(split, fi.IsDir()) {
+					if fi.IsDir() {
+						return filepath.SkipDir
+					}
+					return nil
 				}
-				return nil
 			}
 
 			// return on non-regular files (thanks to [kumo](https://medium.com/@komuw/just-like-you-did-fbdd7df829d3) for this suggested update)
@@ -387,9 +400,11 @@ func (cr *containerReference) copyDir(dstPath string, srcPath string) common.Exe
 				if err != nil {
 					return errors.WithMessagef(err, "unable to readlink %s", file)
 				}
-			} else if !fi.Mode().IsRegular() {
-				return nil
 			}
+			// Comment this block because we don't want to loose permission/ownership of the dirs
+			// } else if !fi.Mode().IsRegular() {
+			// 	return nil
+			// }
 
 			// create a new dir/file header
 			header, err := tar.FileInfoHeader(fi, linkName)
@@ -402,9 +417,18 @@ func (cr *containerReference) copyDir(dstPath string, srcPath string) common.Exe
 			header.Mode = int64(fi.Mode())
 			header.ModTime = fi.ModTime()
 
+			// change ownership of the file to root:root
+			header.Uid = 1001 // user: runner
+			header.Gid = 116  // group: docker
+
 			// write the header
 			if err := tw.WriteHeader(header); err != nil {
 				return err
+			}
+
+			// Return now because this is a dir, no need to read content
+			if !fi.Mode().IsRegular() {
+				return nil
 			}
 
 			// open files for taring
@@ -459,6 +483,8 @@ func (cr *containerReference) copyContent(dstPath string, files ...*FileEntry) c
 				Name: file.Name,
 				Mode: file.Mode,
 				Size: int64(len(file.Body)),
+				Uid:  1001, // user: runner
+				Gid:  116,  // group: docker
 			}
 			if err := tw.WriteHeader(hdr); err != nil {
 				return err
