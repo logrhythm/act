@@ -20,17 +20,18 @@ import (
 
 // RunContext contains info about current job
 type RunContext struct {
-	Name         string
-	Config       *Config
-	Matrix       map[string]interface{}
-	Run          *model.Run
-	EventJSON    string
-	Env          map[string]string
-	ExtraPath    []string
-	CurrentStep  string
-	StepResults  map[string]*stepResult
-	ExprEval     ExpressionEvaluator
-	JobContainer container.Container
+	Name          string
+	Config        *Config
+	Matrix        map[string]interface{}
+	Run           *model.Run
+	EventJSON     string
+	Env           map[string]string
+	ExtraPath     []string
+	CurrentStep   string
+	StepResults   map[string]*stepResult
+	ExprEval      ExpressionEvaluator
+	JobContainer  container.Container
+	DINDContainer container.Container
 }
 
 func (rc *RunContext) String() string {
@@ -48,6 +49,72 @@ func (rc *RunContext) GetEnv() map[string]string {
 		rc.Env = mergeMaps(rc.Config.Env, rc.Run.Workflow.Env, rc.Run.Job().Env)
 	}
 	return rc.Env
+}
+
+func (rc *RunContext) dindContainerName() string {
+	return createContainerName("act", "dind", rc.String())
+}
+
+func (rc *RunContext) startDINDContainer() common.Executor {
+	image := "docker:dind"
+
+	return func(ctx context.Context) error {
+		rawLogger := common.Logger(ctx).WithField("raw_output", true)
+		logWriter := common.NewLineWriter(rc.commandHandler(ctx), func(s string) bool {
+			if rc.Config.LogOutput {
+				rawLogger.Infof(s)
+			} else {
+				rawLogger.Debugf(s)
+			}
+			return true
+		})
+
+		common.Logger(ctx).Infof("\U0001f680  Start image=%s", image)
+		name := rc.dindContainerName()
+
+		envList := make([]string, 0)
+		bindModifiers := ""
+		if runtime.GOOS == "darwin" {
+			bindModifiers = ":delegated"
+		}
+
+		envList = append(envList, fmt.Sprintf("%s=%s", "DOCKER_TLS_CERTDIR", "/certs"))
+
+		binds := []string{
+			// fmt.Sprintf("%s:%s", "/var/run/docker.sock", "/var/run/docker.sock"),
+		}
+		if rc.Config.BindWorkdir {
+			binds = append(binds, fmt.Sprintf("%s:%s%s", rc.Config.Workdir, "/github/workspace", bindModifiers))
+		}
+
+		dindCertVolumeName := fmt.Sprintf("%s-cert", rc.dindContainerName())
+
+		rc.DINDContainer = container.NewContainer(&container.NewContainerInput{
+			Image: image,
+			Name:  name,
+			Env:   envList,
+			Mounts: map[string]string{
+				dindCertVolumeName:    "/certs/client",
+				rc.jobContainerName(): "/github",
+				"act-toolcache":       "/toolcache",
+				"act-actions":         "/actions",
+				"act-runner-home":     "/home/runner",
+				"act-dind-imagecache": "/var/lib/docker/overlay2",
+			},
+			NetworkMode: "default",
+			Binds:       binds,
+			Stdout:      logWriter,
+			Stderr:      logWriter,
+			Privileged:  true,
+		})
+
+		return common.NewPipelineExecutor(
+			rc.DINDContainer.Pull(false),
+			rc.DINDContainer.Remove().IfBool(!rc.Config.ReuseContainers),
+			rc.DINDContainer.Create(),
+			rc.DINDContainer.Start(false),
+		)(ctx)
+	}
 }
 
 func (rc *RunContext) jobContainerName() string {
@@ -80,13 +147,19 @@ func (rc *RunContext) startJobContainer() common.Executor {
 		envList = append(envList, fmt.Sprintf("%s=%s", "RUNNER_TOOL_CACHE", "/opt/hostedtoolcache"))
 		envList = append(envList, fmt.Sprintf("%s=%s", "RUNNER_OS", "Linux"))
 		envList = append(envList, fmt.Sprintf("%s=%s", "RUNNER_TEMP", "/tmp"))
+		// envList = append(envList, fmt.Sprintf("%s=%s", "CI_LOCAL", "true"))
+		envList = append(envList, fmt.Sprintf("%s=%s", "DOCKER_TLS_VERIFY", "1"))
+		envList = append(envList, fmt.Sprintf("%s=%s", "DOCKER_CERT_PATH", "/certs/client"))
+		envList = append(envList, fmt.Sprintf("%s=%s", "DOCKER_HOST", "tcp://docker:2376"))
 
 		binds := []string{
-			fmt.Sprintf("%s:%s", "/var/run/docker.sock", "/var/run/docker.sock"),
+			// fmt.Sprintf("%s:%s", "/var/run/docker.sock", "/var/run/docker.sock"),
 		}
 		if rc.Config.BindWorkdir {
 			binds = append(binds, fmt.Sprintf("%s:%s%s", rc.Config.Workdir, "/github/workspace", bindModifiers))
 		}
+
+		dindCertVolumeName := fmt.Sprintf("%s-cert", rc.dindContainerName())
 
 		rc.JobContainer = container.NewContainer(&container.NewContainerInput{
 			Cmd:        nil,
@@ -96,15 +169,20 @@ func (rc *RunContext) startJobContainer() common.Executor {
 			Name:       name,
 			Env:        envList,
 			Mounts: map[string]string{
-				name:              "/github",
-				"act-toolcache":   "/toolcache",
-				"act-actions":     "/actions",
-				"act-runner-home": "/home/runner",
+				dindCertVolumeName: "/certs/client",
+				name:               "/github",
+				"act-toolcache":    "/toolcache",
+				"act-actions":      "/actions",
+				"act-runner-home":  "/home/runner",
 			},
-			NetworkMode: "host",
-			Binds:       binds,
-			Stdout:      logWriter,
-			Stderr:      logWriter,
+			NetworkMode: "default",
+			Links: []string{
+				fmt.Sprintf("%s:docker", rc.dindContainerName()),
+				fmt.Sprintf("%s:deps.localdev.boreas.cloud", rc.dindContainerName()),
+			},
+			Binds:  binds,
+			Stdout: logWriter,
+			Stderr: logWriter,
 		})
 
 		var copyWorkspace bool
@@ -142,6 +220,7 @@ func (rc *RunContext) stopJobContainer() common.Executor {
 	return func(ctx context.Context) error {
 		if rc.JobContainer != nil && !rc.Config.ReuseContainers {
 			return rc.JobContainer.Remove().
+				Then(rc.DINDContainer.Remove()).
 				Then(container.NewDockerVolumeRemoveExecutor(rc.jobContainerName(), false))(ctx)
 		}
 		return nil
@@ -171,6 +250,7 @@ func (rc *RunContext) Executor() common.Executor {
 		return nil
 	})
 
+	steps = append(steps, rc.startDINDContainer())
 	steps = append(steps, rc.startJobContainer())
 
 	for i, step := range rc.Run.Job().Steps {
