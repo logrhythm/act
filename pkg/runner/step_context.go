@@ -185,6 +185,7 @@ func (sc *StepContext) newStepContainer(ctx context.Context, image string, cmd [
 			rc.jobContainerName(): "/github",
 			"act-toolcache":       "/toolcache",
 			"act-actions":         "/actions",
+			"act-runner-home":     "/home/runner",
 		},
 		NetworkMode: fmt.Sprintf("container:%s", rc.jobContainerName()),
 		Binds:       binds,
