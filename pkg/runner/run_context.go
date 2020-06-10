@@ -180,9 +180,10 @@ func (rc *RunContext) startJobContainer() common.Executor {
 				fmt.Sprintf("%s:docker", rc.dindContainerName()),
 				fmt.Sprintf("%s:deps.localdev.boreas.cloud", rc.dindContainerName()),
 			},
-			Binds:  binds,
-			Stdout: logWriter,
-			Stderr: logWriter,
+			Binds:      binds,
+			Stdout:     logWriter,
+			Stderr:     logWriter,
+			Privileged: true,
 		})
 
 		var copyWorkspace bool
