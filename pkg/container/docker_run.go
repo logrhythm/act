@@ -61,6 +61,7 @@ type Container interface {
 	Start(attach bool) common.Executor
 	Exec(command []string, env map[string]string) common.Executor
 	Remove() common.Executor
+	DockerCleanup() common.Executor
 }
 
 // NewContainer creates a reference to a container
@@ -142,6 +143,16 @@ func (cr *containerReference) Remove() common.Executor {
 		cr.find(),
 	).Finally(
 		cr.remove(),
+	).IfNot(common.Dryrun)
+}
+
+func (cr *containerReference) DockerCleanup() common.Executor {
+	return common.NewPipelineExecutor(
+		cr.connect(),
+		cr.find(),
+		cr.exec([]string{"/bin/sh", "-c", "while (! docker ps > /dev/null 2>&1); do sleep 0.5; done"}, map[string]string{}),
+		cr.exec([]string{"/bin/sh", "-c", "docker rm -f $(docker ps -aq) > /dev/null 2>&1 || true"}, map[string]string{}),
+		cr.exec([]string{"/bin/sh", "-c", "docker system prune -f --volumes"}, map[string]string{}),
 	).IfNot(common.Dryrun)
 }
 

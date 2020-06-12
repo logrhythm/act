@@ -99,7 +99,7 @@ func (rc *RunContext) startDINDContainer() common.Executor {
 				"act-toolcache":       "/toolcache",
 				"act-actions":         "/actions",
 				"act-runner-home":     "/home/runner",
-				"act-dind-imagecache": "/var/lib/docker/overlay2",
+				"act-dind-cache":      "/var/lib/docker",
 			},
 			NetworkMode: "default",
 			Binds:       binds,
@@ -113,6 +113,7 @@ func (rc *RunContext) startDINDContainer() common.Executor {
 			rc.DINDContainer.Remove().IfBool(!rc.Config.ReuseContainers),
 			rc.DINDContainer.Create(),
 			rc.DINDContainer.Start(false),
+			rc.DINDContainer.DockerCleanup(),
 		)(ctx)
 	}
 }
