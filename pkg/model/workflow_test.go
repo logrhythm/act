@@ -49,7 +49,7 @@ jobs:
 func TestReadWorkflow_MapEvent(t *testing.T) {
 	yaml := `
 name: local-action-docker-url
-on: 
+on:
   push:
     branches:
     - master
@@ -82,7 +82,7 @@ jobs:
     steps:
     - uses: ./actions/docker-url
   test2:
-    container: 
+    container:
       image: nginx:latest
       env:
         foo: bar
@@ -97,4 +97,94 @@ jobs:
 	assert.Contains(t, workflow.Jobs["test"].Container().Image, "nginx:latest")
 	assert.Contains(t, workflow.Jobs["test2"].Container().Image, "nginx:latest")
 	assert.Contains(t, workflow.Jobs["test2"].Container().Env["foo"], "bar")
+}
+
+func TestReadWorkflow_StepsTypes(t *testing.T) {
+	yaml := `
+name: invalid step definition
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - name: test1
+        uses: actions/checkout@v2
+        run: echo
+      - name: test2
+        run: echo
+      - name: test3
+        uses: actions/checkout@v2
+      - name: test4
+        uses: docker://nginx:latest
+      - name: test5
+        uses: ./local-action
+`
+
+	workflow, err := ReadWorkflow(strings.NewReader(yaml))
+	assert.NoError(t, err, "read workflow should succeed")
+	assert.Len(t, workflow.Jobs, 1)
+	assert.Len(t, workflow.Jobs["test"].Steps, 5)
+	assert.Equal(t, workflow.Jobs["test"].Steps[0].Type(), StepTypeInvalid)
+	assert.Equal(t, workflow.Jobs["test"].Steps[1].Type(), StepTypeRun)
+	assert.Equal(t, workflow.Jobs["test"].Steps[2].Type(), StepTypeUsesActionRemote)
+	assert.Equal(t, workflow.Jobs["test"].Steps[3].Type(), StepTypeUsesDockerURL)
+	assert.Equal(t, workflow.Jobs["test"].Steps[4].Type(), StepTypeUsesActionLocal)
+}
+
+// See: https://docs.github.com/en/actions/reference/workflow-syntax-for-github-actions#jobsjob_idoutputs
+func TestReadWorkflow_JobOutputs(t *testing.T) {
+	yaml := `
+name: job outputs definition
+
+jobs:
+  test1:
+    runs-on: ubuntu-latest
+    steps:
+      - id: test1_1
+        run: |
+          echo "::set-output name=a_key::some-a_value"
+          echo "::set-output name=b-key::some-b-value"
+    outputs:
+      some_a_key: ${{ steps.test1_1.outputs.a_key }}
+      some-b-key: ${{ steps.test1_1.outputs.b-key }}
+
+  test2:
+    runs-on: ubuntu-latest
+    needs:
+      - test1
+    steps:
+      - name: test2_1
+        run: |
+          echo "${{ needs.test1.outputs.some_a_key }}"
+          echo "${{ needs.test1.outputs.some-b-key }}"
+`
+
+	workflow, err := ReadWorkflow(strings.NewReader(yaml))
+	assert.NoError(t, err, "read workflow should succeed")
+	assert.Len(t, workflow.Jobs, 2)
+
+	assert.Len(t, workflow.Jobs["test1"].Steps, 1)
+	assert.Equal(t, StepTypeRun, workflow.Jobs["test1"].Steps[0].Type())
+	assert.Equal(t, "test1_1", workflow.Jobs["test1"].Steps[0].ID)
+	assert.Len(t, workflow.Jobs["test1"].Outputs, 2)
+	assert.Contains(t, workflow.Jobs["test1"].Outputs, "some_a_key")
+	assert.Contains(t, workflow.Jobs["test1"].Outputs, "some-b-key")
+	assert.Equal(t, "${{ steps.test1_1.outputs.a_key }}", workflow.Jobs["test1"].Outputs["some_a_key"])
+	assert.Equal(t, "${{ steps.test1_1.outputs.b-key }}", workflow.Jobs["test1"].Outputs["some-b-key"])
+}
+
+func TestStep_ShellCommand(t *testing.T) {
+	tests := []struct {
+		shell string
+		want  string
+	}{
+		{"pwsh", "pwsh -command . '{0}'"},
+		{"powershell", "powershell -command . '{0}'"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.shell, func(t *testing.T) {
+			got := (&Step{Shell: tt.shell}).ShellCommand()
+			assert.Equal(t, got, tt.want)
+		})
+	}
 }
